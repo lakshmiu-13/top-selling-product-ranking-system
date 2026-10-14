@@ -1,4 +1,5 @@
 
+import hashlib
 import json
 import os
 import time
@@ -8,6 +9,7 @@ from urllib.parse import quote
 from hdfs import InsecureClient
 from kafka import KafkaConsumer
 from kafka.errors import KafkaError
+from kafka.structs import OffsetAndMetadata, TopicPartition
 
 
 BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
@@ -118,11 +120,18 @@ def validate_transaction(message_value):
 
 def save_to_hdfs(hdfs, transaction, topic, partition, offset):
     """Write one transaction file, retrying temporary HDFS failures."""
-    filename = "{}-{}-{}.json".format(
-        quote(topic, safe=""),
-        partition,
-        offset,
-    )
+    transaction_id = transaction.get("transaction_id")
+    if isinstance(transaction_id, str) and transaction_id.strip():
+        transaction_key = hashlib.sha256(
+            transaction_id.strip().encode("utf-8")
+        ).hexdigest()
+        filename = "{}-transaction-{}.json".format(
+            quote(topic, safe=""), transaction_key
+        )
+    else:
+        filename = "{}-{}-{}.json".format(
+            quote(topic, safe=""), partition, offset
+        )
     path = "{}/{}".format(HDFS_INPUT_DIR.rstrip("/"), filename)
     last_error = None
 
@@ -162,6 +171,16 @@ def save_to_hdfs(hdfs, transaction, topic, partition, offset):
     )
 
 
+def commit_message(consumer, message):
+    """Commit only the next offset for the message just handled."""
+    partition = TopicPartition(message.topic, message.partition)
+    consumer.commit(
+        {
+            partition: OffsetAndMetadata(message.offset + 1, ""),
+        }
+    )
+
+
 def main():
     hdfs = connect_hdfs()
     consumer = connect_kafka()
@@ -184,7 +203,7 @@ def main():
 
                 # This record is intentionally rejected. Commit its offset
                 # so the same invalid record is not processed forever.
-                consumer.commit()
+                commit_message(consumer, message)
                 invalid_count += 1
                 continue
 
@@ -197,7 +216,7 @@ def main():
                 message.offset,
             )
 
-            consumer.commit()
+            commit_message(consumer, message)
             saved_count += 1
 
             print(

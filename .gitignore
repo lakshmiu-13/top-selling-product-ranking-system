@@ -3,3 +3,7 @@ __pycache__/
 .venv/
 venv/
 .env
+data/instacart/*.csv
+data/instacart/**/*.csv
+data/instacart/*.zip
+data/instacart/**/*.zip

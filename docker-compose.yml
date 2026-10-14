@@ -15,7 +15,7 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     ports:
-      - "9092:9092"
+      - "${KAFKA_HOST_PORT:-9092}:9092"
     volumes:
       - kafka-data:/var/lib/kafka/data
     healthcheck:
@@ -36,7 +36,7 @@ services:
       HDFS_CONF_dfs_replication: 1
       HDFS_CONF_dfs_namenode_name_dir: file:///hadoop/dfs/name
     ports:
-      - "9870:9870"
+      - "${NAMENODE_HOST_PORT:-9870}:9870"
     volumes:
       - namenode-data:/hadoop/dfs/name
     healthcheck:
@@ -80,7 +80,12 @@ services:
       MAPRED_CONF_mapreduce_framework_name: local
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: sales-transactions
+      SALES_DATASET: ${SALES_DATASET:-instacart}
       SALES_CSV: /app/data/sales.csv
+      INSTACART_PRODUCTS_CSV: /app/data/instacart/products.csv/products.csv
+      INSTACART_ORDER_PRODUCTS_CSV: /app/data/instacart/order_products__prior.csv/order_products__prior.csv
+      INSTACART_MAX_EVENTS: ${INSTACART_MAX_EVENTS:-100}
+      INSTACART_REPLAY_DELAY_SECONDS: ${INSTACART_REPLAY_DELAY_SECONDS:-0.5}
       HDFS_URL: http://namenode:9870
       HDFS_INPUT_DIR: /sales/input
       HADOOP_HOME: /opt/hadoop-3.2.1

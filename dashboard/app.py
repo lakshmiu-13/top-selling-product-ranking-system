@@ -15,7 +15,7 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st_autorefresh(interval=10 * 60 * 1000, key="dashboard_refresh")
+st_autorefresh(interval=15 * 1000, key="dashboard_refresh")
 
 ROOT = Path(__file__).resolve().parents[1]
 RESULT_FILE = ROOT / "results" / "top10_products.csv"
