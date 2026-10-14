@@ -10,15 +10,16 @@ Member 3 owns the Hadoop Streaming MapReduce portion of this repository:
 - Keep output deterministic and valid CSV for the dashboard and result file.
 - Maintain automated tests and document the MapReduce contract and integration.
 
-The producer, Kafka consumer, Compose services, image, and scheduler are owned
-by the rest of the team and are dependencies of this contribution.
+The producer, Kafka consumer, Compose services, image, and scheduler are
+integrated as part of the full pipeline.
 
 ## Existing Architecture
 
 The current pipeline is wired as follows:
 
-1. `producer/producer.py` reads `data/sales.csv` and publishes each CSV row as
-   a JSON Kafka message to `sales-transactions`.
+1. `producer/producer.py` defaults to replaying rows from the Instacart
+  order-products data in `data/instacart/` as JSON Kafka messages to
+  `sales-transactions`. A one-shot CSV mode remains available.
 2. `consumer/consumer.py` validates each message and writes it to HDFS below
    `/sales/input`.
 3. `scheduler/run.sh` runs Hadoop Streaming against that HDFS directory,
@@ -27,7 +28,39 @@ The current pipeline is wired as follows:
    `results/top10_products.csv`.
 
 Docker Compose runs Kafka, HDFS, the pipeline, and dashboard. The pipeline
-waits for the CSV transactions to reach HDFS before the first ranking run.
+waits for its configured initial event count to reach HDFS before the first
+ranking run.
+
+## Instacart Replay Source
+
+The supplied files are nested under `data/instacart/`:
+
+- `products.csv/products.csv` maps product IDs to names.
+- `order_products__prior.csv/order_products__prior.csv` contains order ID,
+  product ID, and add-to-cart order.
+- `orders.csv/orders.csv` contains order day and hour, but no calendar date.
+
+The producer joins the first two files and treats each order-product row as one
+product occurrence with `units_sold=1`. It does not infer package quantity.
+Because the source has no true transaction timestamp, each replay event gets a
+UTC timestamp at publish time. The producer defaults to 100 rows per cycle and
+repeats the sample with a 0.5-second delay. `INSTACART_MAX_EVENTS` and
+`INSTACART_REPLAY_DELAY_SECONDS` control the sample size and pace. The cycle
+number is part of each event ID; restarting begins at cycle zero so previously
+written event IDs are overwritten rather than counted twice.
+
+This is a streaming demonstration using historical Instacart data, not a live
+Instacart feed. The raw files are intentionally excluded from Git and Docker
+build context; Compose mounts the local `data/` directory into the pipeline.
+Set `SALES_DATASET=csv` to use the original one-shot `data/sales.csv` producer
+instead.
+
+To inject one manual event while Compose is running, start
+`docker compose exec kafka /opt/kafka/bin/kafka-console-producer.sh
+--bootstrap-server kafka:9092 --topic sales-transactions` and enter a JSON
+object with `transaction_id`, `product_name`, and nonnegative integer
+`units_sold`. It will be consumed into HDFS and included in a subsequent
+10-minute ranking run.
 
 ## Input Contract: HDFS JSON Lines
 
@@ -126,9 +159,12 @@ reducer scripts as subprocesses. It covers valid transactions, required
 fields, invalid JSON and record shapes, product-name validation, boolean,
 fractional and negative quantities, aggregation, ranking and tie order, top-ten
 truncation, fewer than ten products, empty input, malformed reducer records,
-CSV escaping, and a complete mapper-to-reducer run.
+CSV escaping, and a complete mapper-to-reducer run. `tests/test_consumer.py`
+checks precise Kafka offset commits and stable HDFS paths on replay with
+mocked Kafka and HDFS dependencies. `tests/test_producer.py` verifies the
+Instacart product join, replay event fields, sample limits, and stable IDs.
 
-**Verified result for this implementation:** 19 tests ran and passed; 0 failed.
+**Verified result for this implementation:** 25 tests ran and passed; 0 failed.
 Command: `python -m unittest discover -s tests -v`.
 
 ## Hadoop Streaming Integration
@@ -145,45 +181,63 @@ multiple reducers would each produce a partial ranking and CSV header. A
 single reducer receives all product keys, calculates the global totals and
 top ten, and produces one correctly ranked CSV.
 
+With the default `SCHEDULER_INTERVAL_SECONDS=600`, ranking runs are scheduled
+on a 10-minute start-to-start cadence after the first eligible run. Runtime of
+the MapReduce job is subtracted from the wait; if a job itself takes longer
+than 10 minutes, the next run starts as soon as it finishes. The dashboard
+polls the output CSV every 15 seconds, so it should display a completed ranking
+within about 15 seconds instead of waiting for another 10-minute UI refresh.
+
 ## Docker Compatibility
 
 The pipeline image is based on `bde2020/hadoop-base:2.0.0-hadoop3.2.1-java8`,
 installs Python 3 and `pipeline-requirements.txt`, and copies `mapreduce/` into
-the image. The mapper and reducer themselves need only Python's standard
-library. Hadoop Streaming must be able to find `python3` on its task PATH and
-the scripts must remain compatible with the Python version provided by the
-image. The test suite uses `subprocess.run` with `universal_newlines` for
-compatibility with older Python 3 releases.
+the image. Raw `data/instacart/` files are excluded from the Docker build
+context and supplied through the Compose bind mount. The mapper and reducer
+themselves need only Python's standard library. Hadoop Streaming must be able
+to find `python3` on its task PATH and the scripts must remain compatible with
+the Python version provided by the image. The test suite uses
+`subprocess.run` with `universal_newlines` for compatibility with older Python
+3 releases.
 
 The tests validate script behavior locally; they do not start Docker, Kafka,
-or Hadoop. A Compose run is a separate end-to-end integration check.
+or Hadoop. Consumer unit tests mock Kafka and HDFS, including offset commits
+and replay-safe writes. A Compose run is a separate end-to-end integration
+check.
 
 ## Integration Dependencies and Known Risks
 
-- **Member 1 producer:** supplies JSON objects containing `product_name` and
-  `units_sold`. The current CSV has those fields and publishes one message per
-  source row. Product names must remain single-line, and quantities must be
-  whole, nonnegative integers.
+- **Producer/data:** Instacart order-product rows become one unit-occurrence
+  event each. This is a proxy for product counts because the source has no
+  explicit quantity; replay timestamps are synthetic. The original CSV mode
+  still requires `product_name` and `units_sold` and publishes once.
 - **Member 2 consumer:** writes the records in the JSONL format described
   above, preserving transaction fields. If its field names, normalization, or
   HDFS directory change, update and retest the mapper contract with the team.
-- **Kafka offset commits (Member 2 dependency):** inspection found that the
-  consumer calls `consumer.commit()` after individual writes/rejections. Since
-  a consumer may have fetched additional records, committing its current
-  position can advance past records not yet written to HDFS. This is outside
-  Member 3 scope and needs owner review.
-- **Repeated ingestion (pipeline dependency):** Compose preserves Kafka and
-  HDFS volumes, while pipeline startup republishes the whole CSV. Repeated
-  starts can therefore add duplicate transactions under new Kafka offsets and
-  inflate aggregate totals. Deduplication or an explicit reset/replay policy
-  is outside Member 3 scope.
-- **Checked-in results:** the existing `results/top10_products.csv` totals do
-  not match one pass over the current dataset. For example, Wireless
-  Headphones totals 1,842 in the CSV but 5,526 in that artifact. This guide
-  does not regenerate or modify the artifact.
-- **Hadoop runtime:** only the local subprocess tests have been run for this
-  contribution. Hadoop Streaming and Docker image compatibility still need an
-  end-to-end run in the project environment.
+- **Kafka offset commits:** the consumer now explicitly commits only the next
+  offset for the message just processed, and only for that message's topic and
+  partition. HDFS is written before committing; a crash in between can replay
+  a message, so HDFS writes use a stable transaction-ID filename when the
+  record has a non-empty string `transaction_id`.
+- **Repeated ingestion:** the Instacart demo intentionally loops through its
+  sample, assigning a cycle number to event IDs so each simulated replay adds
+  one new occurrence. A process restart begins at cycle zero and overwrites
+  those earlier IDs. Records without IDs still use Kafka
+  topic/partition/offset filenames and are not replay-idempotent.
+- **Legacy HDFS data:** existing offset-named files from earlier runs are not
+  automatically migrated or deleted. Back them up and deliberately clear
+  `/sales/input` (or reset Docker volumes only when their data can be discarded)
+  before expecting a clean recomputation. Do not remove persisted volumes
+  without confirming that their Kafka/HDFS contents are disposable.
+- **Legacy results/HDFS:** the result artifact previously contained inflated
+  totals, and old offset-named HDFS files are not automatically migrated. The
+  isolated demo run regenerated the local CSV from a fresh HDFS volume. Back up
+  and deliberately clear old `/sales/input` data before expecting clean totals
+  when reusing an older volume.
+- **Verification scope:** both Docker images built and the isolated Compose
+  pipeline completed a Hadoop Streaming ranking from 100 Instacart replay
+  events. The dashboard health endpoint returned HTTP 200. The full 10-minute
+  recurring interval was not waited through during verification.
 
 ## Viva Questions and Answers
 
@@ -222,26 +276,26 @@ needed and escapes embedded quotes.
 Mapper output is tab-delimited key/value text for Hadoop's shuffle. Reducer
 output is CSV intended for the result file and dashboard.
 
-**What integration issues remain outside Member 3?**
-The consumer's offset commit position and repeated publication of the source
-CSV can lead to missed or duplicated records. Both require coordination with
-the owning team members.
+**What integration issues remain?**
+The replay is simulated historical data rather than a live feed, and old
+offset-named HDFS files still need deliberate cleanup before trusting a fresh
+total. The consumer's current commits target individual processed offsets.
 
 ## Pull Request Instructions
 
-After the team approves Git submission, verify the branch and stage only the
-Member 3 files:
+Before creating a follow-up PR, verify the branch and stage only the intended
+dataset-integration and replay-safety files:
 
 ```sh
 git status --short --branch
-git add mapreduce/mapper.py mapreduce/reducer.py tests/test_mapreduce.py README.md MEMBER3_MAPREDUCE_GUIDE.md
-git commit -m "Harden MapReduce ranking and add tests"
-git push -u origin feature/mapreduce-ranking
+git add .dockerignore .gitignore docker-compose.yml producer/producer.py consumer/consumer.py scheduler/run-pipeline.sh scheduler/run.sh dashboard/app.py tests/test_producer.py tests/test_consumer.py README.md MEMBER3_MAPREDUCE_GUIDE.md
+git commit -m "Add Instacart replay demo and safe ingestion"
+git push -u origin fix/replay-safe-ingestion
 ```
 
-Then create a GitHub Pull Request from `feature/mapreduce-ranking` into
+Then create a GitHub Pull Request from `fix/replay-safe-ingestion` into
 `master`. Include the test command and result, summarize the JSONL-to-CSV
-contract changes, and call out the consumer offset and repeated-ingestion
-risks. Review the staged diff to ensure no producer, consumer, deployment,
-dataset, or generated-result files are included. Do not merge until the team
-has reviewed the integration dependencies.
+contract changes, and call out the simulated dataset semantics and legacy HDFS
+cleanup requirement. Review the staged diff to ensure the raw dataset and
+generated results are not included. Do not merge until the team has reviewed
+the integration dependencies.

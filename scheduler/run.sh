@@ -32,6 +32,7 @@ mkdir -p "$(dirname "$RESULT_PATH")"
 trap 'rm -f "$TEMP_RESULT"' EXIT
 
 while true; do
+    cycle_started=$SECONDS
     input_count=0
     if hdfs dfs -test -d "$INPUT_PATH" 2>/dev/null; then
         input_listing=$(hdfs dfs -ls "$INPUT_PATH" 2>/dev/null) || input_listing=""
@@ -51,10 +52,14 @@ while true; do
             -file /app/mapreduce/mapper.py \
             -file /app/mapreduce/reducer.py
 
-        hdfs dfs -cat "$OUTPUT_PATH"/part-* > "$TEMP_RESULT"
+        hdfs dfs -cat "$OUTPUT_PATH"/part-* | sed 's/\t$//' > "$TEMP_RESULT"
         mv "$TEMP_RESULT" "$RESULT_PATH"
         echo "Updated product rankings at $RESULT_PATH."
-        sleep "$INTERVAL"
+        elapsed=$((SECONDS - cycle_started))
+        remaining=$((INTERVAL - elapsed))
+        if [ "$remaining" -gt 0 ]; then
+            sleep "$remaining"
+        fi
     else
         echo "Waiting for sales transactions in HDFS at $INPUT_PATH (${input_count}/${EXPECTED_COUNT} expected transaction files); checking again in ${POLL_INTERVAL}s."
         sleep "$POLL_INTERVAL"
