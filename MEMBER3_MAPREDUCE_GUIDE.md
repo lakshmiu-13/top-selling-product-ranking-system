@@ -42,12 +42,13 @@ The supplied files are nested under `data/instacart/`:
 
 The producer joins the first two files and treats each order-product row as one
 product occurrence with `units_sold=1`. It does not infer package quantity.
-Because the source has no true transaction timestamp, each replay event gets a
-UTC timestamp at publish time. The producer defaults to 100 rows per cycle and
-repeats the sample with a 0.5-second delay. `INSTACART_MAX_EVENTS` and
-`INSTACART_REPLAY_DELAY_SECONDS` control the sample size and pace. The cycle
-number is part of each event ID; restarting begins at cycle zero so previously
-written event IDs are overwritten rather than counted twice.
+Because the source has no true transaction timestamp, each event gets a UTC
+timestamp at publish time. The producer defaults to 100 rows per batch and
+continues from the next source row in the following batch. At end of file it
+wraps to the beginning and advances the dataset-pass ID. `INSTACART_MAX_EVENTS`
+sets batch size and `INSTACART_REPLAY_DELAY_SECONDS` controls event pacing.
+Restarting begins from the first source row, so IDs for already-seen rows in
+the same dataset pass overwrite their previous HDFS files.
 
 This is a streaming demonstration using historical Instacart data, not a live
 Instacart feed. The raw files are intentionally excluded from Git and Docker
@@ -164,7 +165,7 @@ checks precise Kafka offset commits and stable HDFS paths on replay with
 mocked Kafka and HDFS dependencies. `tests/test_producer.py` verifies the
 Instacart product join, replay event fields, sample limits, and stable IDs.
 
-**Verified result for this implementation:** 25 tests ran and passed; 0 failed.
+**Verified result for this implementation:** 26 tests ran and passed; 0 failed.
 Command: `python -m unittest discover -s tests -v`.
 
 ## Hadoop Streaming Integration
@@ -219,11 +220,13 @@ check.
   partition. HDFS is written before committing; a crash in between can replay
   a message, so HDFS writes use a stable transaction-ID filename when the
   record has a non-empty string `transaction_id`.
-- **Repeated ingestion:** the Instacart demo intentionally loops through its
-  sample, assigning a cycle number to event IDs so each simulated replay adds
-  one new occurrence. A process restart begins at cycle zero and overwrites
-  those earlier IDs. Records without IDs still use Kafka
-  topic/partition/offset filenames and are not replay-idempotent.
+- **Repeated ingestion:** the Instacart producer advances through consecutive
+  order-product rows in each batch. At EOF it wraps to row 1 and increments the
+  dataset-pass ID, so a later pass represents new simulated occurrences. A
+  process restart begins at row 1/pass zero; those event IDs overwrite that
+  pass's files, while any later dataset-pass files from an earlier run remain
+  in HDFS. Records without IDs use Kafka topic/partition/offset filenames and
+  are not replay-idempotent.
 - **Legacy HDFS data:** existing offset-named files from earlier runs are not
   automatically migrated or deleted. Back them up and deliberately clear
   `/sales/input` (or reset Docker volumes only when their data can be discarded)

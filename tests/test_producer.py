@@ -75,7 +75,7 @@ class InstacartProducerTests(unittest.TestCase):
             producer,
             self.products_file,
             self.order_products_file,
-            max_events=10,
+            max_events=2,
             delay_seconds=0,
             max_cycles=1,
         )
@@ -89,7 +89,7 @@ class InstacartProducerTests(unittest.TestCase):
         self.assertEqual(first["source"], "instacart-replay")
         self.assertTrue(first["sold_at"].endswith("Z"))
 
-    def test_max_events_applies_per_cycle_and_replay_ids_are_stable(self):
+    def test_batches_advance_to_the_next_rows(self):
         producer = FakeProducer()
 
         count = self.producer_module.publish_instacart_replay(
@@ -104,7 +104,30 @@ class InstacartProducerTests(unittest.TestCase):
         self.assertEqual(count, 2)
         self.assertEqual(
             [message[1]["transaction_id"] for message in producer.messages],
-            ["instacart-0-500-11-1", "instacart-1-500-11-1"],
+            ["instacart-0-500-11-1", "instacart-0-500-12-2"],
+        )
+
+    def test_replay_wraps_to_first_row_with_a_new_dataset_pass_id(self):
+        producer = FakeProducer()
+
+        count = self.producer_module.publish_instacart_replay(
+            producer,
+            self.products_file,
+            self.order_products_file,
+            max_events=2,
+            delay_seconds=0,
+            max_cycles=2,
+        )
+
+        self.assertEqual(count, 4)
+        self.assertEqual(
+            [message[1]["transaction_id"] for message in producer.messages],
+            [
+                "instacart-0-500-11-1",
+                "instacart-0-500-12-2",
+                "instacart-1-500-11-1",
+                "instacart-1-500-12-2",
+            ],
         )
 
     def test_restarting_replay_starts_with_same_event_ids(self):

@@ -28,14 +28,15 @@ Install and start Docker Desktop, then run from this directory:
 docker compose up --build
 ```
 
-By default, the pipeline replays 100 prior Instacart order-product rows from
-`data/instacart/` as simulated events, repeating the sample continuously. Each
-row is treated as one product occurrence (`units_sold=1`), not a recorded item
-quantity or live sale. The dataset does not provide calendar transaction
-timestamps, so `sold_at` is assigned at replay time. The raw files are local
-inputs and are excluded from Git and the Docker build context. To use the
-original sample CSV instead, set `SALES_DATASET=csv`; that mode publishes
-`data/sales.csv` once. CSV mode requires `product_name` and `units_sold`.
+By default, the pipeline streams 100 prior Instacart order-product rows per
+batch from `data/instacart/`, continuing from the previous batch. At end of
+file, it wraps to the first row and starts a new dataset pass. Each row is one
+product occurrence (`units_sold=1`), not an actual item quantity or live sale.
+The dataset has no calendar transaction timestamps, so `sold_at` is assigned
+at replay time. Raw files are local inputs and are excluded from Git and the
+Docker build context. To use the original sample CSV instead, set
+`SALES_DATASET=csv`; that mode publishes `data/sales.csv` once. CSV mode
+requires `product_name` and `units_sold`.
 
 Compose waits for Kafka, the NameNode, and the DataNode health checks before
 starting the pipeline. The scheduler waits for the initial event sample to

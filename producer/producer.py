@@ -99,7 +99,7 @@ def publish_instacart_replay(
     delay_seconds=None,
     max_cycles=None,
 ):
-    """Replay prior order-product rows as simulated individual sale events."""
+    """Replay prior order-product rows sequentially in simulated event batches."""
     if max_events is None:
         max_events = int(os.getenv("INSTACART_MAX_EVENTS", "10000"))
     if delay_seconds is None:
@@ -134,25 +134,33 @@ def publish_instacart_replay(
         }
 
     total_sent = 0
-    cycle = 0
-    while max_cycles is None or cycle < max_cycles:
-        sent_this_cycle = 0
-        with order_products_file.open(
-            newline="", encoding="utf-8-sig"
-        ) as order_products_csv:
-            reader = csv.DictReader(order_products_csv)
-            if not {"order_id", "product_id", "add_to_cart_order"}.issubset(
-                reader.fieldnames or []
-            ):
-                raise ValueError(
-                    "Instacart order-products CSV must contain order_id, "
-                    "product_id, and add_to_cart_order."
-                )
+    batch = 0
+    dataset_pass = 0
+    with order_products_file.open(
+        newline="", encoding="utf-8-sig"
+    ) as order_products_csv:
+        reader = csv.DictReader(order_products_csv)
+        if not {"order_id", "product_id", "add_to_cart_order"}.issubset(
+            reader.fieldnames or []
+        ):
+            raise ValueError(
+                "Instacart order-products CSV must contain order_id, "
+                "product_id, and add_to_cart_order."
+            )
 
-            for line_number, row in enumerate(reader, start=2):
-                if sent_this_cycle >= max_events:
-                    break
+        while max_cycles is None or batch < max_cycles:
+            sent_this_batch = 0
+            for _ in range(max_events):
+                row = next(reader, None)
+                if row is None:
+                    order_products_csv.seek(0)
+                    reader = csv.DictReader(order_products_csv)
+                    dataset_pass += 1
+                    row = next(reader, None)
+                    if row is None:
+                        break
 
+                line_number = reader.line_num
                 order_id = (row.get("order_id") or "").strip()
                 product_id = (row.get("product_id") or "").strip()
                 cart_order = (row.get("add_to_cart_order") or "").strip()
@@ -173,7 +181,7 @@ def publish_instacart_replay(
                 ).replace(microsecond=0).isoformat().replace("+00:00", "Z")
                 transaction = {
                     "transaction_id": "instacart-{}-{}-{}-{}".format(
-                        cycle, order_id, product_id, cart_order
+                        dataset_pass, order_id, product_id, cart_order
                     ),
                     "order_id": order_id,
                     "product_id": product_id,
@@ -183,24 +191,24 @@ def publish_instacart_replay(
                     "source": "instacart-replay",
                 }
                 producer.send(TOPIC, transaction).get(timeout=30)
-                sent_this_cycle += 1
+                sent_this_batch += 1
                 total_sent += 1
                 if delay_seconds:
                     time.sleep(delay_seconds)
 
-        if sent_this_cycle == 0:
-            if cycle == 0:
-                raise ValueError(
-                    "No Instacart order-product records were available."
-                )
-            break
+            if sent_this_batch == 0:
+                if total_sent == 0:
+                    raise ValueError(
+                        "No Instacart order-product records were available."
+                    )
+                break
 
-        print(
-            "Instacart replay cycle {} published {} event(s).".format(
-                cycle + 1, sent_this_cycle
+            print(
+                "Instacart replay batch {} published {} event(s).".format(
+                    batch + 1, sent_this_batch
+                )
             )
-        )
-        cycle += 1
+            batch += 1
 
     return total_sent
 
